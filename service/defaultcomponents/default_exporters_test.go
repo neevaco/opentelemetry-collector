@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/collector/exporter/fileexporter"
 	"go.opentelemetry.io/collector/exporter/jaegerexporter"
 	"go.opentelemetry.io/collector/exporter/kafkaexporter"
+	"go.opentelemetry.io/collector/exporter/neevafileexporter"
 	"go.opentelemetry.io/collector/exporter/opencensusexporter"
 	"go.opentelemetry.io/collector/exporter/otlpexporter"
 	"go.opentelemetry.io/collector/exporter/otlphttpexporter"
@@ -84,6 +85,14 @@ func TestDefaultExporters(t *testing.T) {
 		{
 			exporter:      "logging",
 			skipLifecycle: runtime.GOOS == "darwin", // TODO: investigate why this fails on darwin.
+		},
+		{
+			exporter: "neevafile",
+			getConfigFn: func() config.Exporter {
+				cfg := expFactories["neevafile"].CreateDefaultConfig().(*neevafileexporter.Config)
+				cfg.RootPath = t.TempDir()
+				return cfg
+			},
 		},
 		{
 			exporter: "opencensus",
