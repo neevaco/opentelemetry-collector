@@ -1,0 +1,20 @@
+receivers:
+  nop:
+
+processors:
+  nop:
+
+exporters:
+  neevafile: # invalid, no root_path
+  neevafile/2:
+    root_path: /rootpath
+
+service:
+  pipelines:
+    traces:
+      receivers: [nop]
+      processors: [nop]
+      exporters: [neevafile]
+    metrics:
+      receivers: [nop]
+      exporters: [neevafile,neevafile/2]
