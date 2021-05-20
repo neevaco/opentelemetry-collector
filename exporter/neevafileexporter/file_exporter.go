@@ -46,7 +46,6 @@ type neevaFileExporter struct {
 	logger      *zap.Logger
 	group       *errgroup.Group
 	spanCh      chan spanData
-	jsonCh      chan []byte
 	loopErrorCh chan struct{}
 
 	mu       sync.Mutex
@@ -72,7 +71,6 @@ func newNeevaFileExporter(config *Config, logger *zap.Logger) *neevaFileExporter
 		config:      config,
 		logger:      logger,
 		spanCh:      make(chan spanData, config.JSONWorkers),
-		jsonCh:      make(chan []byte, 1000),
 		loopErrorCh: make(chan struct{}),
 	}
 }
@@ -90,17 +88,19 @@ func (e *neevaFileExporter) ConsumeTraces(ctx context.Context, td pdata.Traces) 
 	resSpans := td.ResourceSpans()
 	for i := 0; i < resSpans.Len(); i++ {
 		resSpan := resSpans.At(i)
+		resource := resSpan.Resource()
 		libSpans := resSpan.InstrumentationLibrarySpans()
 		for j := 0; j < libSpans.Len(); j++ {
 			libSpan := libSpans.At(j)
 			spans := libSpan.Spans()
 			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-e.loopErrorCh: // avoid deadlock if the goroutine loops fail
 					return errors.New("neevaFileExporter failed with error")
-				case e.spanCh <- spanData{spans.At(k), resSpan.Resource()}:
+				case e.spanCh <- spanData{span, resource}:
 				}
 			}
 		}
@@ -117,9 +117,10 @@ func (e *neevaFileExporter) Start(_ context.Context, host component.Host) error 
 	// https://github.com/neevaco/opentelemetry-collector/blob/8d6bf0d2d382686eb9d21ceacdbce4b39fe51998/component/component.go#L41-L45
 	e.logger.Info("Starting neevaFileExporter")
 	ctx := context.Background()
+	jsonCh := make(chan []byte, 1000)
 	e.group, ctx = errgroup.WithContext(ctx)
-	e.group.Go(func() error { return e.jsonLoops(ctx) })
-	e.group.Go(func() error { return e.writerLoop(ctx) })
+	e.group.Go(func() error { return e.jsonLoops(ctx, jsonCh) })
+	e.group.Go(func() error { return e.writerLoop(ctx, jsonCh) })
 	go func() {
 		// If any goroutine fails, all of them are canceled and we'll report a fatal error.
 		if err := e.group.Wait(); err != nil {
@@ -143,16 +144,16 @@ func (e *neevaFileExporter) Shutdown(context.Context) error {
 	return e.group.Wait()
 }
 
-func (e *neevaFileExporter) jsonLoops(ctx context.Context) error {
-	defer close(e.jsonCh)
+func (e *neevaFileExporter) jsonLoops(ctx context.Context, jsonCh chan<- []byte) error {
+	defer close(jsonCh)
 	group, ctx := errgroup.WithContext(ctx)
 	for i := 0; i < e.config.JSONWorkers; i++ {
-		group.Go(func() error { return e.jsonLoop(ctx) })
+		group.Go(func() error { return e.jsonLoop(ctx, jsonCh) })
 	}
 	return group.Wait()
 }
 
-func (e *neevaFileExporter) jsonLoop(ctx context.Context) (errReturn error) {
+func (e *neevaFileExporter) jsonLoop(ctx context.Context, jsonCh chan<- []byte) (errReturn error) {
 	e.logger.Info("Starting neevaFileExporter json loop")
 	defer func() {
 		e.logger.Info("Stopping neevaFileExporter json loop", zap.Error(errReturn))
@@ -172,7 +173,7 @@ func (e *neevaFileExporter) jsonLoop(ctx context.Context) (errReturn error) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case e.jsonCh <- data:
+			case jsonCh <- data:
 			}
 		}
 	}
@@ -180,7 +181,7 @@ func (e *neevaFileExporter) jsonLoop(ctx context.Context) (errReturn error) {
 
 // TODO(toddw): If writing S3 files becomes a bottleneck, we can pretty easily run multiple writer
 // loops to write separate files concurrently.  We'll just need to ensure file names are unique.
-func (e *neevaFileExporter) writerLoop(ctx context.Context) (errReturn error) {
+func (e *neevaFileExporter) writerLoop(ctx context.Context, jsonCh <-chan []byte) (errReturn error) {
 	e.logger.Info("Starting neevaFileExporter writer loop")
 	defer func() {
 		e.logger.Info("Stopping neevaFileExporter writer loop", zap.Error(errReturn))
@@ -193,7 +194,7 @@ func (e *neevaFileExporter) writerLoop(ctx context.Context) (errReturn error) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case data, ok := <-e.jsonCh:
+		case data, ok := <-jsonCh:
 			if !ok {
 				return rf.Close(ctx)
 			}
